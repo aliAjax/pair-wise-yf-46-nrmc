@@ -9,13 +9,18 @@ import { z } from "zod";
 import { useTranslation } from "react-i18next";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { SortableItem } from "./components/SortableItem";
-import { useGetRundownQuery, useSaveRundownMutation } from "./store/api";
+import { ScriptsPage } from "./components/ScriptsPage";
+import { useGetRundownQuery, useGetScriptsQuery, useSaveRundownMutation, useSaveScriptsMutation } from "./store/api";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { addItem, adjustDuration, initialize, insertBreaking, queueChange, reorder, setOnline, setRole, skipItem, syncQueue, undo, updateStatus } from "./store/rundownSlice";
+import { createScript, initializeScripts, markAired, toPersisted } from "./store/scriptSlice";
 import type { ItemType, Role, RundownItem } from "./types";
 
 const schema = z.object({ title: z.string().min(2), type: z.enum(["新闻片", "连线", "嘉宾", "口播", "广告"]), duration: z.number().min(1).max(120), presenter: z.string().min(1), source: z.string().min(1) });
 type FormValues = z.infer<typeof schema>;
+
+const SCRIPT_TYPES: ItemType[] = ["口播", "新闻片"];
+const hasScript = (type: ItemType) => SCRIPT_TYPES.includes(type);
 
 function useTimeline(items: RundownItem[]) {
   const start = new Date("2026-10-08T08:00:00");
@@ -30,6 +35,7 @@ function useTimeline(items: RundownItem[]) {
 function RundownPage() {
   const dispatch = useAppDispatch();
   const { items, role, online } = useAppSelector((state) => state.rundown);
+  const scriptVersions = useAppSelector((state) => state.scripts.versions);
   const saveMutation = useSaveRundownMutation()[0];
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const timeline = useTimeline(items);
@@ -39,6 +45,15 @@ function RundownPage() {
 
   useEffect(() => { const timer = setTimeout(() => { void saveMutation(items); }, 250); return () => clearTimeout(timer); }, [items, saveMutation]);
 
+  const scriptBadge = (item: RundownItem) => {
+    if (!hasScript(item.type)) return undefined;
+    const versions = scriptVersions.filter((v) => v.itemId === item.id);
+    if (!versions.length) return <Tag>未绑定稿件</Tag>;
+    const latest = [...versions].sort((a, b) => b.version - a.version)[0];
+    const color = latest.status === "已下发" ? "green" : latest.status === "已确认" ? "geekblue" : latest.status === "待确认" ? "orange" : "red";
+    return <Tag color={color}>稿 v{latest.version}·{latest.status}</Tag>;
+  };
+
   const onDragEnd = (event: DragEndEvent) => {
     if (!event.over || event.active.id === event.over.id || role !== "导播") return;
     const oldIndex = items.findIndex((item) => item.id === event.active.id);
@@ -47,9 +62,16 @@ function RundownPage() {
   };
 
   const submit = (values: FormValues) => {
-    dispatch(addItem(values));
+    const id = crypto.randomUUID();
+    dispatch(addItem({ ...values, id }));
+    if (hasScript(values.type)) dispatch(createScript({ itemId: id, title: values.title }));
     if (!online) dispatch(queueChange({ action: "新增条目", detail: values.title }));
     reset();
+  };
+
+  const airItem = (item: RundownItem) => {
+    dispatch(updateStatus({ id: item.id, status: "已播出" }));
+    if (hasScript(item.type)) dispatch(markAired({ itemId: item.id, title: item.title }));
   };
 
   return <div className="page-grid">
@@ -58,7 +80,7 @@ function RundownPage() {
       <div className="summary"><span><b>{items.length}</b> 条内容</span><span><b>{total}</b> 分钟总时长</span><span className={overrun.length ? "danger-text" : ""}><b>{overrun.length}</b> 个硬时间风险</span><span><b>{timeline.at(-1)?.at ?? "--:--"}</b> 预计收播</span></div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
         <SortableContext items={items.map((item) => item.id)} strategy={verticalListSortingStrategy}>
-          <div className="rundown-list">{timeline.map(({ item, at }) => <SortableItem key={item.id} item={item} cumulative={at} onDuration={(delta) => dispatch(adjustDuration({ id: item.id, delta }))} onStatus={() => dispatch(updateStatus({ id: item.id, status: "已播出" }))} onSkip={() => dispatch(skipItem(item.id))} />)}</div>
+          <div className="rundown-list">{timeline.map(({ item, at }) => <SortableItem key={item.id} item={item} cumulative={at} badge={scriptBadge(item)} onDuration={(delta) => dispatch(adjustDuration({ id: item.id, delta }))} onStatus={() => airItem(item)} onSkip={() => dispatch(skipItem(item.id))} />)}</div>
         </SortableContext>
       </DndContext>
     </Card>
@@ -85,7 +107,13 @@ function BreakingForm() {
     <Input value={values.headline} onChange={(event) => setValues({ ...values, headline: event.target.value })} placeholder="插播标题" />
     <div className="two-cols"><InputNumber value={values.duration} onChange={(value) => setValues({ ...values, duration: Number(value ?? 5) })} addonAfter="分钟" /><Select value={values.insertAfter} onChange={(value) => setValues({ ...values, insertAfter: value })} options={items.map((item) => ({ value: item.id, label: `插在「${item.title}」后` }))} /></div>
     <Input value={values.reason} onChange={(event) => setValues({ ...values, reason: event.target.value })} placeholder="插播原因" />
-    <Button type="primary" danger block disabled={values.headline.length < 2} onClick={() => { dispatch(insertBreaking(values)); if (!online) message.warning("已进入本地应急队列"); setValues({ ...values, headline: "" }); }}>立即插入并重算时长</Button>
+    <Button type="primary" danger block disabled={values.headline.length < 2} onClick={() => {
+      const newItemId = crypto.randomUUID();
+      dispatch(insertBreaking({ ...values, newItemId }));
+      dispatch(createScript({ itemId: newItemId, title: values.headline }));
+      if (!online) message.warning("已进入本地应急队列");
+      setValues({ ...values, headline: "" });
+    }}>立即插入并重算时长</Button>
     {!online && <small>离线操作将在主链路恢复后统一提交，当前顺序仍可用于本地播出。</small>}
   </Card>;
 }
@@ -104,16 +132,27 @@ function dispatchSync() {
 export default function App() {
   const dispatch = useAppDispatch();
   const state = useAppSelector((root) => root.rundown);
+  const scriptsState = useAppSelector((root) => root.scripts);
   const { data = [] } = useGetRundownQuery();
+  const { data: persistedScripts } = useGetScriptsQuery();
+  const saveScripts = useSaveScriptsMutation()[0];
   const { t, i18n } = useTranslation();
+  const scriptAlertCount = useMemo(() => scriptsState.suspensions.filter((s) => !s.resolved).length + scriptsState.dispatchRecords.filter((r) => r.status === "待发").length, [scriptsState]);
+
   useEffect(() => { if (data.length) dispatch(initialize(data)); }, [data, dispatch]);
+  useEffect(() => { if (persistedScripts !== undefined) dispatch(initializeScripts(persistedScripts)); }, [persistedScripts, dispatch]);
+  useEffect(() => {
+    if (!scriptsState.initialized) return;
+    const timer = setTimeout(() => { void saveScripts(toPersisted(scriptsState)); }, 250);
+    return () => clearTimeout(timer);
+  }, [scriptsState, saveScripts]);
   useEffect(() => {
     const handler = () => { dispatch(syncQueue()); message.success("应急队列已同步"); };
     window.addEventListener("sync-queue", handler);
     return () => window.removeEventListener("sync-queue", handler);
   }, [dispatch]);
   return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><span>LIVE</span><div><b>{t("title")}</b><small>Control room</small></div></div><nav><NavLink to="/">{t("rundown")}</NavLink><NavLink to="/changes">{t("changes")}</NavLink><NavLink to="/queue">{t("queue")} {state.queue.length ? <em>{state.queue.length}</em> : null}</NavLink></nav><Button ghost onClick={() => void i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh")}>{i18n.language === "zh" ? "EN" : "中文"}</Button></aside>
-    <main><header className="topbar"><div><small>直播运行中 · 紧急操作均保留审计记录</small><h1>{t("title")}</h1></div><div className="top-actions"><label>在线模式 <Switch checked={state.online} onChange={(value) => dispatch(setOnline(value))} /></label><label>当前岗位 <Select<Role> value={state.role} onChange={(value) => dispatch(setRole(value))} options={[{value:"导播"},{value:"主编"},{value:"字幕"},{value:"演播室"}]} /></label></div></header><Routes><Route path="/" element={<RundownPage />} /><Route path="/changes" element={<ChainPage mode="changes" />} /><Route path="/queue" element={<ChainPage mode="queue" />} /><Route path="/history" element={<ChainPage mode="history" />} /></Routes></main>
+    <aside className="sidebar"><div className="brand"><span>LIVE</span><div><b>{t("title")}</b><small>Control room</small></div></div><nav><NavLink to="/">{t("rundown")}</NavLink><NavLink to="/scripts">{t("scripts")} {scriptAlertCount ? <em>{scriptAlertCount}</em> : null}</NavLink><NavLink to="/changes">{t("changes")}</NavLink><NavLink to="/queue">{t("queue")} {state.queue.length ? <em>{state.queue.length}</em> : null}</NavLink></nav><Button ghost onClick={() => void i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh")}>{i18n.language === "zh" ? "EN" : "中文"}</Button></aside>
+    <main><header className="topbar"><div><small>直播运行中 · 紧急操作均保留审计记录</small><h1>{t("title")}</h1></div><div className="top-actions"><label>在线模式 <Switch checked={state.online} onChange={(value) => dispatch(setOnline(value))} /></label><label>当前岗位 <Select<Role> value={state.role} onChange={(value) => dispatch(setRole(value))} options={[{value:"导播"},{value:"主编"},{value:"字幕"},{value:"演播室"}]} /></label></div></header><Routes><Route path="/" element={<RundownPage />} /><Route path="/scripts" element={<ScriptsPage />} /><Route path="/changes" element={<ChainPage mode="changes" />} /><Route path="/queue" element={<ChainPage mode="queue" />} /><Route path="/history" element={<ChainPage mode="history" />} /></Routes></main>
   </div>;
 }

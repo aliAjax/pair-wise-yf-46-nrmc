@@ -5,7 +5,9 @@ const seed: RundownItem[] = [
   { id: "r1", title: "早间新闻提要", type: "新闻片", duration: 4, hardStart: "08:00", status: "已播出", presenter: "陈默", source: "主控" },
   { id: "r2", title: "城市更新现场连线", type: "连线", duration: 8, hardStart: "08:06", status: "待播", presenter: "陈默", source: "记者周岚" },
   { id: "r3", title: "政策发布会解读", type: "嘉宾", duration: 12, status: "待播", presenter: "陈默", source: "演播室A" },
-  { id: "r4", title: "整点广告", type: "广告", duration: 3, hardStart: "08:30", status: "待播", presenter: "系统", source: "广告串" }
+  { id: "r4", title: "整点广告", type: "广告", duration: 3, hardStart: "08:30", status: "待播", presenter: "系统", source: "广告串" },
+  { id: "r5", title: "午间快讯口播", type: "口播", duration: 2, status: "待播", presenter: "陈默", source: "主编台" },
+  { id: "r6", title: "台风路径最新通报", type: "新闻片", duration: 5, status: "待播", presenter: "陈默", source: "气象中心" }
 ];
 
 interface State {
@@ -36,9 +38,9 @@ const slice = createSlice({
     },
     setRole(state, action: PayloadAction<Role>) { state.role = action.payload; },
     setOnline(state, action: PayloadAction<boolean>) { state.online = action.payload; },
-    addItem(state, action: PayloadAction<Omit<RundownItem, "id" | "status">>) {
+    addItem(state, action: PayloadAction<Omit<RundownItem, "id" | "status"> & { id?: string }>) {
       state.history.unshift(snapshot(state.items, "新增条目", action.payload.title));
-      state.items.push({ ...action.payload, id: crypto.randomUUID(), status: "草稿" });
+      state.items.push({ ...action.payload, id: action.payload.id ?? crypto.randomUUID(), status: "草稿" });
     },
     updateStatus(state, action: PayloadAction<{ id: string; status: RundownItem["status"] }>) {
       const item = state.items.find((entry) => entry.id === action.payload.id);
@@ -56,11 +58,12 @@ const slice = createSlice({
       state.history.unshift(snapshot(state.items, "调整时长", `${item.title} ${action.payload.delta > 0 ? "增加" : "减少"} ${Math.abs(action.payload.delta)} 分钟`));
       item.duration = Math.max(1, item.duration + action.payload.delta);
     },
-    insertBreaking(state, action: PayloadAction<Omit<BreakingChange, "id" | "createdAt">>) {
-      const change: BreakingChange = { ...action.payload, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+    insertBreaking(state, action: PayloadAction<Omit<BreakingChange, "id" | "createdAt"> & { newItemId?: string }>) {
+      const { newItemId, ...rest } = action.payload;
+      const change: BreakingChange = { ...rest, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
       const index = state.items.findIndex((item) => item.id === change.insertAfter);
       state.history.unshift(snapshot(state.items, "突发插播", change.headline));
-      state.items.splice(index + 1, 0, { id: crypto.randomUUID(), title: change.headline, type: "新闻片", duration: change.duration, status: "待播", presenter: "值班主播", source: `插播：${change.reason}` });
+      state.items.splice(index + 1, 0, { id: newItemId ?? crypto.randomUUID(), title: change.headline, type: "新闻片", duration: change.duration, status: "待播", presenter: "值班主播", source: `插播：${change.reason}` });
       state.changes.unshift(change);
       if (!state.online) state.queue.unshift({ id: crypto.randomUUID(), action: "突发插播", detail: change.headline, queuedAt: change.createdAt });
     },
