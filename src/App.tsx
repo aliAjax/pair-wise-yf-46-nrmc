@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { closestCenter, DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { arrayMove, SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { Button, Card, Form, Input, InputNumber, Select, Switch, Tag, Timeline, message } from "antd";
@@ -9,10 +9,13 @@ import { z } from "zod";
 import { useTranslation } from "react-i18next";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { SortableItem } from "./components/SortableItem";
-import { useGetRundownQuery, useSaveRundownMutation } from "./store/api";
+import { ScriptsPage } from "./pages/ScriptsPage";
+import { PrompterPage } from "./pages/PrompterPage";
+import { useGetRundownQuery, useGetScriptsQuery, useSaveRundownMutation, useSaveScriptsMutation } from "./store/api";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
 import { addItem, adjustDuration, initialize, insertBreaking, queueChange, reorder, setOnline, setRole, skipItem, syncQueue, undo, updateStatus } from "./store/rundownSlice";
-import type { ItemType, Role, RundownItem } from "./types";
+import { initializeScripts, reconcile } from "./store/scriptsSlice";
+import type { ItemType, Role, RundownItem, ScriptsPersistState } from "./types";
 
 const schema = z.object({ title: z.string().min(2), type: z.enum(["新闻片", "连线", "嘉宾", "口播", "广告"]), duration: z.number().min(1).max(120), presenter: z.string().min(1), source: z.string().min(1) });
 type FormValues = z.infer<typeof schema>;
@@ -47,7 +50,7 @@ function RundownPage() {
   };
 
   const submit = (values: FormValues) => {
-    dispatch(addItem(values));
+    dispatch(addItem({ ...values, id: crypto.randomUUID(), status: "草稿" }));
     if (!online) dispatch(queueChange({ action: "新增条目", detail: values.title }));
     reset();
   };
@@ -85,7 +88,7 @@ function BreakingForm() {
     <Input value={values.headline} onChange={(event) => setValues({ ...values, headline: event.target.value })} placeholder="插播标题" />
     <div className="two-cols"><InputNumber value={values.duration} onChange={(value) => setValues({ ...values, duration: Number(value ?? 5) })} addonAfter="分钟" /><Select value={values.insertAfter} onChange={(value) => setValues({ ...values, insertAfter: value })} options={items.map((item) => ({ value: item.id, label: `插在「${item.title}」后` }))} /></div>
     <Input value={values.reason} onChange={(event) => setValues({ ...values, reason: event.target.value })} placeholder="插播原因" />
-    <Button type="primary" danger block disabled={values.headline.length < 2} onClick={() => { dispatch(insertBreaking(values)); if (!online) message.warning("已进入本地应急队列"); setValues({ ...values, headline: "" }); }}>立即插入并重算时长</Button>
+    <Button type="primary" danger block disabled={values.headline.length < 2} onClick={() => { dispatch(insertBreaking({ ...values, id: crypto.randomUUID() })); if (!online) message.warning("已进入本地应急队列"); setValues({ ...values, headline: "" }); }}>立即插入并重算时长</Button>
     {!online && <small>离线操作将在主链路恢复后统一提交，当前顺序仍可用于本地播出。</small>}
   </Card>;
 }
@@ -104,16 +107,54 @@ function dispatchSync() {
 export default function App() {
   const dispatch = useAppDispatch();
   const state = useAppSelector((root) => root.rundown);
+  const scriptsState = useAppSelector((root) => root.scripts);
   const { data = [] } = useGetRundownQuery();
+  const { data: scriptsData } = useGetScriptsQuery();
+  const [saveScripts] = useSaveScriptsMutation();
   const { t, i18n } = useTranslation();
   useEffect(() => { if (data.length) dispatch(initialize(data)); }, [data, dispatch]);
+  useEffect(() => { if (scriptsData) dispatch(initializeScripts(scriptsData)); }, [scriptsData, dispatch]);
+
+  // 稿件状态持久化（消息、抽屉状态不持久化）
+  const scriptsPersist = useMemo<ScriptsPersistState>(() => ({
+    scripts: scriptsState.scripts,
+    distributions: scriptsState.distributions,
+    teleprompter: scriptsState.teleprompter,
+    suspended: scriptsState.suspended,
+    broadcastLog: scriptsState.broadcastLog
+  }), [scriptsState.scripts, scriptsState.distributions, scriptsState.teleprompter, scriptsState.suspended, scriptsState.broadcastLog]);
+  useEffect(() => {
+    if (!scriptsState.loaded) return;
+    const timer = setTimeout(() => void saveScripts(scriptsPersist), 300);
+    return () => clearTimeout(timer);
+  }, [scriptsPersist, scriptsState.loaded, saveScripts]);
+
+  // 网络恢复后自动对账：按条目编号与稿件版本核对提词器缓存
+  const prevOnline = useRef(state.online);
+  useEffect(() => {
+    if (!prevOnline.current && state.online) dispatch(reconcile());
+    prevOnline.current = state.online;
+  }, [state.online, dispatch]);
+
+  // 稿件操作提示（越权拒绝、下发结果等）
+  const messagesSeen = useRef(0);
+  useEffect(() => {
+    const unseen = scriptsState.messages.slice(messagesSeen.current);
+    messagesSeen.current = scriptsState.messages.length;
+    for (const msg of unseen) {
+      if (msg.type === "error") message.error(msg.text);
+      else if (msg.type === "success") message.success(msg.text);
+      else message.info(msg.text);
+    }
+  }, [scriptsState.messages]);
+
   useEffect(() => {
     const handler = () => { dispatch(syncQueue()); message.success("应急队列已同步"); };
     window.addEventListener("sync-queue", handler);
     return () => window.removeEventListener("sync-queue", handler);
   }, [dispatch]);
   return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><span>LIVE</span><div><b>{t("title")}</b><small>Control room</small></div></div><nav><NavLink to="/">{t("rundown")}</NavLink><NavLink to="/changes">{t("changes")}</NavLink><NavLink to="/queue">{t("queue")} {state.queue.length ? <em>{state.queue.length}</em> : null}</NavLink></nav><Button ghost onClick={() => void i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh")}>{i18n.language === "zh" ? "EN" : "中文"}</Button></aside>
-    <main><header className="topbar"><div><small>直播运行中 · 紧急操作均保留审计记录</small><h1>{t("title")}</h1></div><div className="top-actions"><label>在线模式 <Switch checked={state.online} onChange={(value) => dispatch(setOnline(value))} /></label><label>当前岗位 <Select<Role> value={state.role} onChange={(value) => dispatch(setRole(value))} options={[{value:"导播"},{value:"主编"},{value:"字幕"},{value:"演播室"}]} /></label></div></header><Routes><Route path="/" element={<RundownPage />} /><Route path="/changes" element={<ChainPage mode="changes" />} /><Route path="/queue" element={<ChainPage mode="queue" />} /><Route path="/history" element={<ChainPage mode="history" />} /></Routes></main>
+    <aside className="sidebar"><div className="brand"><span>LIVE</span><div><b>{t("title")}</b><small>Control room</small></div></div><nav><NavLink to="/">{t("rundown")}</NavLink><NavLink to="/scripts">{t("scripts")}</NavLink><NavLink to="/prompter">{t("prompter")} {scriptsState.suspended.length ? <em>{scriptsState.suspended.length}</em> : null}</NavLink><NavLink to="/changes">{t("changes")}</NavLink><NavLink to="/queue">{t("queue")} {state.queue.length ? <em>{state.queue.length}</em> : null}</NavLink></nav><Button ghost onClick={() => void i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh")}>{i18n.language === "zh" ? "EN" : "中文"}</Button></aside>
+    <main><header className="topbar"><div><small>直播运行中 · 紧急操作均保留审计记录</small><h1>{t("title")}</h1></div><div className="top-actions"><label>在线模式 <Switch checked={state.online} onChange={(value) => dispatch(setOnline(value))} /></label><label>当前岗位 <Select<Role> value={state.role} onChange={(value) => dispatch(setRole(value))} options={[{value:"导播"},{value:"主编"},{value:"字幕"},{value:"演播室"}]} /></label></div></header><Routes><Route path="/" element={<RundownPage />} /><Route path="/scripts" element={<ScriptsPage />} /><Route path="/prompter" element={<PrompterPage />} /><Route path="/changes" element={<ChainPage mode="changes" />} /><Route path="/queue" element={<ChainPage mode="queue" />} /><Route path="/history" element={<ChainPage mode="history" />} /></Routes></main>
   </div>;
 }

@@ -36,9 +36,9 @@ const slice = createSlice({
     },
     setRole(state, action: PayloadAction<Role>) { state.role = action.payload; },
     setOnline(state, action: PayloadAction<boolean>) { state.online = action.payload; },
-    addItem(state, action: PayloadAction<Omit<RundownItem, "id" | "status">>) {
+    addItem(state, action: PayloadAction<RundownItem>) {
       state.history.unshift(snapshot(state.items, "新增条目", action.payload.title));
-      state.items.push({ ...action.payload, id: crypto.randomUUID(), status: "草稿" });
+      state.items.push({ ...action.payload, status: "草稿" });
     },
     updateStatus(state, action: PayloadAction<{ id: string; status: RundownItem["status"] }>) {
       const item = state.items.find((entry) => entry.id === action.payload.id);
@@ -56,11 +56,11 @@ const slice = createSlice({
       state.history.unshift(snapshot(state.items, "调整时长", `${item.title} ${action.payload.delta > 0 ? "增加" : "减少"} ${Math.abs(action.payload.delta)} 分钟`));
       item.duration = Math.max(1, item.duration + action.payload.delta);
     },
-    insertBreaking(state, action: PayloadAction<Omit<BreakingChange, "id" | "createdAt">>) {
-      const change: BreakingChange = { ...action.payload, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+    insertBreaking(state, action: PayloadAction<Omit<BreakingChange, "createdAt">>) {
+      const change: BreakingChange = { ...action.payload, createdAt: new Date().toISOString() };
       const index = state.items.findIndex((item) => item.id === change.insertAfter);
       state.history.unshift(snapshot(state.items, "突发插播", change.headline));
-      state.items.splice(index + 1, 0, { id: crypto.randomUUID(), title: change.headline, type: "新闻片", duration: change.duration, status: "待播", presenter: "值班主播", source: `插播：${change.reason}` });
+      state.items.splice(index + 1, 0, { id: change.id, title: change.headline, type: "新闻片", duration: change.duration, status: "待播", presenter: "值班主播", source: `插播：${change.reason}` });
       state.changes.unshift(change);
       if (!state.online) state.queue.unshift({ id: crypto.randomUUID(), action: "突发插播", detail: change.headline, queuedAt: change.createdAt });
     },
